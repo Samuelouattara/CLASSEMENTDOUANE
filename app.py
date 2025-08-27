@@ -5,6 +5,7 @@ from typing import Dict, List, Tuple, Optional
 import json
 import os
 from ai_classifier import AdvancedCEDEAOClassifier
+from dictionnaire_utils import DictionnaireFrancais, analyser_description_douane, suggerer_améliorations_description
 
 class CEDEAOClassifier:
     def __init__(self):
@@ -13,8 +14,10 @@ class CEDEAOClassifier:
         self.chapters = {}
         self.subheadings = {}
         self.advanced_classifier = None
+        self.dictionnaire_francais = None
         self.load_data()
         self.initialize_advanced_classifier()
+        self.initialize_dictionnaire_francais()
     
     def initialize_advanced_classifier(self):
         """Initialise le classificateur avancé"""
@@ -24,6 +27,16 @@ class CEDEAOClassifier:
         except Exception as e:
             st.warning(f"L'IA avancée n'est pas disponible: {e}")
             self.advanced_classifier = None
+    
+    def initialize_dictionnaire_francais(self):
+        """Initialise le dictionnaire français"""
+        try:
+            with st.spinner("Chargement du dictionnaire français..."):
+                self.dictionnaire_francais = DictionnaireFrancais()
+                st.success(f"✓ Dictionnaire français chargé: {len(self.dictionnaire_francais.mots_francais)} mots")
+        except Exception as e:
+            st.warning(f"Le dictionnaire français n'est pas disponible: {e}")
+            self.dictionnaire_francais = None
         
     def load_data(self):
         """Charge et parse le fichier de données CEDEAO"""
@@ -63,17 +76,19 @@ class CEDEAOClassifier:
     
     def parse_subheadings(self, content: str):
         """Parse les sous-positions avec leurs taux"""
-        # Pattern pour les sous-positions avec codes et taux
-        subheading_pattern = r'(\d{2}\.\d{2}\.\d{2})\s+([^\n]+?)\s+(\d+(?:\.\d+)?%)'
+        # Pattern pour les sous-positions avec codes et taux (format CEDEAO)
+        subheading_pattern = r'(\d{4}\.\d{2}\.\d{2}\.\d{2})\s+--\s+([^\n]+?)\s+([a-z]+)\s+(\d+)\s+\d+'
         matches = re.finditer(subheading_pattern, content)
         
         for match in matches:
             code = match.group(1)
             description = match.group(2).strip()
-            rate = match.group(3)
+            unit = match.group(3)
+            rate = match.group(4) + "%"
             self.subheadings[code] = {
                 'description': description,
-                'rate': rate
+                'rate': rate,
+                'unit': unit
             }
     
     def search_product(self, description: str, use_advanced: bool = True) -> List[Dict]:
@@ -157,6 +172,53 @@ class CEDEAOClassifier:
         }
         
         return chapter_to_section.get(chapter_num, 'Non déterminée')
+    
+    def analyser_description_francaise(self, description: str) -> Dict:
+        """Analyse une description avec le dictionnaire français"""
+        if not self.dictionnaire_francais:
+            return {
+                "disponible": False,
+                "message": "Dictionnaire français non disponible"
+            }
+        
+        try:
+            analyse = analyser_description_douane(description, self.dictionnaire_francais)
+            suggestions = suggerer_améliorations_description(description, self.dictionnaire_francais)
+            
+            return {
+                "disponible": True,
+                "analyse": analyse,
+                "suggestions": suggestions,
+                "qualite_francais": self._evaluer_qualite_francais(analyse['ratio_francais'])
+            }
+        except Exception as e:
+            return {
+                "disponible": False,
+                "erreur": str(e)
+            }
+    
+    def _evaluer_qualite_francais(self, ratio: float) -> str:
+        """Évalue la qualité française d'une description"""
+        if ratio >= 0.7:
+            return "Excellente"
+        elif ratio >= 0.5:
+            return "Bonne"
+        elif ratio >= 0.3:
+            return "Moyenne"
+        else:
+            return "Faible"
+    
+    def enrichir_dictionnaire(self, nouveaux_mots: List[str]):
+        """Enrichit le dictionnaire avec de nouveaux mots"""
+        if self.dictionnaire_francais:
+            self.dictionnaire_francais.enrichir_dictionnaire(nouveaux_mots)
+            st.success(f"✓ Dictionnaire enrichi avec {len(nouveaux_mots)} nouveaux mots")
+    
+    def obtenir_statistiques_dictionnaire(self) -> Dict:
+        """Retourne les statistiques du dictionnaire français"""
+        if self.dictionnaire_francais:
+            return self.dictionnaire_francais.obtenir_statistiques()
+        return {"disponible": False}
 
 def main():
     st.set_page_config(
@@ -206,16 +268,19 @@ def main():
         with st.spinner("Chargement de la base de données CEDEAO..."):
             st.session_state.classifier = CEDEAOClassifier()
     
-    # Interface utilisateur
-    col1, col2 = st.columns([2, 1])
+    # Interface utilisateur avec onglets
+    tab1, tab2 = st.tabs(["🔍 Classification", "🇫🇷 Dictionnaire Français"])
     
-    with col1:
-        st.subheader("🔍 Description du Produit")
-        product_description = st.text_area(
-            "Entrez une description détaillée du produit à classifier :",
-            placeholder="Exemple: Ordinateur portable avec écran tactile, processeur Intel i7, 16GB RAM, 512GB SSD...",
-            height=150
-        )
+    with tab1:
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.subheader("🔍 Description du Produit")
+            product_description = st.text_area(
+                "Entrez une description détaillée du produit à classifier :",
+                placeholder="Exemple: Ordinateur portable avec écran tactile, processeur Intel i7, 16GB RAM, 512GB SSD...",
+                height=150
+            )
         
         # Options de classification
         col1, col2 = st.columns(2)
@@ -314,28 +379,143 @@ def main():
             else:
                 st.error("⚠️ Veuillez entrer une description de produit.")
     
-    with col2:
-        st.subheader("📊 Informations Système")
+        with col2:
+            st.subheader("📊 Informations Système")
+            
+            # Statistiques
+            st.metric("Sections", len(st.session_state.classifier.sections))
+            st.metric("Chapitres", len(st.session_state.classifier.chapters))
+            st.metric("Sous-positions", len(st.session_state.classifier.subheadings))
+            
+            # Statistiques du dictionnaire français
+            if st.session_state.classifier.dictionnaire_francais:
+                stats_dico = st.session_state.classifier.obtenir_statistiques_dictionnaire()
+                if stats_dico.get("disponible", False):
+                    st.metric("Mots français", stats_dico["total_mots"])
+            
+            # Analyse française de la description
+            if product_description.strip():
+                st.subheader("🇫🇷 Analyse Française")
+                
+                analyse_fr = st.session_state.classifier.analyser_description_francaise(product_description)
+                
+                if analyse_fr["disponible"]:
+                    analyse = analyse_fr["analyse"]
+                    suggestions = analyse_fr["suggestions"]
+                    qualite = analyse_fr["qualite_francais"]
+                    
+                    # Indicateur de qualité
+                    if qualite == "Excellente":
+                        st.success(f"✅ Qualité française: {qualite}")
+                    elif qualite == "Bonne":
+                        st.info(f"ℹ️ Qualité française: {qualite}")
+                    elif qualite == "Moyenne":
+                        st.warning(f"⚠️ Qualité française: {qualite}")
+                    else:
+                        st.error(f"❌ Qualité française: {qualite}")
+                    
+                    # Ratio français
+                    st.metric("Ratio français", f"{analyse['ratio_francais']:.1%}")
+                    
+                    # Mots français trouvés
+                    if analyse['mots_francais_trouves']:
+                        st.write(f"**Mots français:** {len(analyse['mots_francais_trouves'])}")
+                        with st.expander("Voir les mots français"):
+                            st.write(", ".join(analyse['mots_francais_trouves'][:10]))
+                            if len(analyse['mots_francais_trouves']) > 10:
+                                st.write(f"... et {len(analyse['mots_francais_trouves']) - 10} autres")
+                    
+                    # Suggestions d'amélioration
+                    if suggestions:
+                        st.write("**Suggestions d'amélioration:**")
+                        for suggestion in suggestions[:3]:  # Limiter à 3 suggestions
+                            st.write(f"• {suggestion}")
+                else:
+                    st.warning("⚠️ Analyse française non disponible")
+            
+            st.subheader("📋 Règles Générales")
+            st.markdown("""
+            **RGI 1:** Les titres des sections, chapitres et sous-chapitres n'ont qu'une valeur indicative.
+            
+            **RGI 2:** Les marchandises incomplètes ou non finies sont classées comme complètes.
+            
+            **RGI 3:** Le mélange ou l'assemblage de matières ou d'articles est classé selon la matière prépondérante.
+            
+            **RGI 4:** Les marchandises qui ne peuvent être classées selon les règles 1 à 3 sont classées dans la position la plus analogue.
+            
+            **RGI 5:** Les emballages sont classés avec les marchandises qu'ils contiennent.
+            
+            **RGI 6:** Le classement des marchandises dans les sous-positions d'une même position est déterminé selon les termes de ces sous-positions.
+            """)
+    
+    # Onglet Dictionnaire Français
+    with tab2:
+        st.subheader("🇫🇷 Gestion du Dictionnaire Français")
         
-        # Statistiques
-        st.metric("Sections", len(st.session_state.classifier.sections))
-        st.metric("Chapitres", len(st.session_state.classifier.chapters))
-        st.metric("Sous-positions", len(st.session_state.classifier.subheadings))
-        
-        st.subheader("📋 Règles Générales")
-        st.markdown("""
-        **RGI 1:** Les titres des sections, chapitres et sous-chapitres n'ont qu'une valeur indicative.
-        
-        **RGI 2:** Les marchandises incomplètes ou non finies sont classées comme complètes.
-        
-        **RGI 3:** Le mélange ou l'assemblage de matières ou d'articles est classé selon la matière prépondérante.
-        
-        **RGI 4:** Les marchandises qui ne peuvent être classées selon les règles 1 à 3 sont classées dans la position la plus analogue.
-        
-        **RGI 5:** Les emballages sont classés avec les marchandises qu'ils contiennent.
-        
-        **RGI 6:** Le classement des marchandises dans les sous-positions d'une même position est déterminé selon les termes de ces sous-positions.
-        """)
+        if st.session_state.classifier.dictionnaire_francais:
+            # Statistiques du dictionnaire
+            stats = st.session_state.classifier.obtenir_statistiques_dictionnaire()
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total mots", stats["total_mots"])
+            with col2:
+                st.metric("Longueur moyenne", f"{stats['longueur_moyenne']:.1f}")
+            with col3:
+                st.metric("Mots uniques", len(set(st.session_state.classifier.dictionnaire_francais.mots_francais)))
+            
+            # Test de mots
+            st.subheader("🔍 Test de Mots")
+            test_word = st.text_input("Entrez un mot à tester :", placeholder="Exemple: ballon")
+            
+            if test_word:
+                is_french = st.session_state.classifier.dictionnaire_francais.est_mot_francais(test_word)
+                if is_french:
+                    st.success(f"✅ '{test_word}' est un mot français")
+                else:
+                    st.error(f"❌ '{test_word}' n'est pas reconnu comme français")
+                    
+                    # Suggestions
+                    suggestions = st.session_state.classifier.dictionnaire_francais.suggerer_mots_similaires(test_word)
+                    if suggestions:
+                        st.write("**Suggestions similaires:**")
+                        st.write(", ".join(suggestions))
+            
+            # Enrichissement du dictionnaire
+            st.subheader("➕ Enrichir le Dictionnaire")
+            new_words = st.text_area(
+                "Ajouter de nouveaux mots (un par ligne) :",
+                placeholder="nouveau_mot1\nnouveau_mot2\nnouveau_mot3",
+                height=100
+            )
+            
+            if st.button("Ajouter les mots", type="primary"):
+                if new_words.strip():
+                    words_list = [word.strip() for word in new_words.split('\n') if word.strip()]
+                    st.session_state.classifier.enrichir_dictionnaire(words_list)
+                    st.rerun()
+            
+            # Analyse de texte
+            st.subheader("📝 Analyse de Texte")
+            text_to_analyze = st.text_area(
+                "Texte à analyser :",
+                placeholder="Entrez un texte pour analyser sa qualité française...",
+                height=150
+            )
+            
+            if text_to_analyze:
+                analyse = st.session_state.classifier.analyser_description_francaise(text_to_analyze)
+                if analyse["disponible"]:
+                    st.write(f"**Ratio français:** {analyse['analyse']['ratio_francais']:.1%}")
+                    st.write(f"**Mots français trouvés:** {len(analyse['analyse']['mots_francais_trouves'])}")
+                    
+                    if analyse['suggestions']:
+                        st.write("**Suggestions d'amélioration:**")
+                        for suggestion in analyse['suggestions']:
+                            st.write(f"• {suggestion}")
+        else:
+            st.error("❌ Dictionnaire français non disponible")
+            st.info("Le dictionnaire français n'a pas pu être chargé. Vérifiez que le fichier 'dictionnaire_francais.txt' existe.")
     
     # Pied de page
     st.markdown("---")
